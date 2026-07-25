@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>SqueegeeHQ</title>
+
+<!-- iPhone / PWA install support -->
+<link rel="manifest" href="manifest.json" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="SqueegeeHQ" />
+<meta name="theme-color" content="#0d1117" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png" />
+
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ SPLASH / LOADING ============ -->
+<div id="splash" class="splash">
+  <div class="splash-bubble">🫧</div>
+  <div class="splash-title">SqueegeeHQ</div>
+  <div class="splash-sub">getting things sparkly…</div>
+</div>
+
+<!-- ============ LOGIN / ROLE SCREEN ============ -->
+<div id="loginScreen" class="screen login-screen hidden">
+  <div class="login-wrap">
+    <div class="login-logo">🪟✨</div>
+    <h1 class="login-title">SqueegeeHQ</h1>
+    <p class="login-sub">Who's clocking in?</p>
+
+    <div id="roleChooser" class="role-chooser">
+      <button class="role-card role-owner" id="btnChooseOwner">
+        <span class="role-emoji">👑</span>
+        <span class="role-label">I'm the Owner</span>
+      </button>
+      <button class="role-card role-tech" id="btnChooseTech">
+        <span class="role-emoji">🧽</span>
+        <span class="role-label">I'm a Cleaning Tech</span>
+      </button>
+    </div>
+
+    <!-- Owner passcode entry -->
+    <div id="ownerLoginForm" class="login-form hidden">
+      <button class="back-link" data-back>← back</button>
+      <div id="ownerSetupExtra" class="hidden">
+        <label class="field-label">Business Name</label>
+        <input id="ownerBizNameInput" class="bubble-input" type="text" placeholder="e.g. Clearview Window Co." />
+        <label class="field-label">Create a Passcode</label>
+      </div>
+      <label id="ownerPasscodeLabel" class="field-label">Owner Passcode</label>
+      <input id="ownerPasscodeInput" class="bubble-input passcode-input" type="password" inputmode="numeric" maxlength="6" placeholder="••••" />
+      <button id="ownerLoginBtn" class="btn-primary">Let's go</button>
+      <p id="ownerLoginMsg" class="form-msg"></p>
+    </div>
+
+    <!-- Tech pick + passcode -->
+    <div id="techLoginForm" class="login-form hidden">
+      <button class="back-link" data-back>← back</button>
+      <label class="field-label">Pick your name</label>
+      <div id="techPickList" class="tech-pick-list"></div>
+      <div id="techPasscodeWrap" class="hidden">
+        <label class="field-label">Your Passcode</label>
+        <input id="techPasscodeInput" class="bubble-input passcode-input" type="password" inputmode="numeric" maxlength="6" placeholder="••••" />
+        <button id="techLoginBtn" class="btn-primary">Let's go</button>
+      </div>
+      <p id="techLoginMsg" class="form-msg"></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MAIN APP ============ -->
+<div id="app" class="app hidden">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span id="topbarEmoji">🫧</span>
+      <span id="topbarTitle">Home</span>
+    </div>
+    <button id="topbarAvatar" class="topbar-avatar">👤</button>
+  </header>
+
+  <!-- Views -->
+  <main class="views">
+
+    <section id="view-home" class="view">
+      <div id="homeContent"></div>
+    </section>
+
+    <section id="view-map" class="view hidden">
+      <div id="mapToolbar" class="map-toolbar"></div>
+      <div id="googleMap" class="google-map"></div>
+      <div id="mapLegend" class="map-legend"></div>
+    </section>
+
+    <section id="view-calendar" class="view hidden">
+      <div id="calendarContent"></div>
+    </section>
+
+    <section id="view-team" class="view hidden">
+      <div id="teamContent"></div>
+    </section>
+
+    <section id="view-earnings" class="view hidden">
+      <div id="earningsContent"></div>
+    </section>
+
+    <section id="view-settings" class="view hidden">
+      <div id="settingsContent"></div>
+    </section>
+
+  </main>
+
+  <!-- Bottom tab bar -->
+  <nav id="tabbar" class="tabbar"></nav>
+</div>
+
+<!-- ============ MODAL ROOT ============ -->
+<div id="modalRoot" class="modal-root hidden">
+  <div class="modal-backdrop" id="modalBackdrop"></div>
+  <div class="modal-sheet" id="modalSheet"></div>
+</div>
+
+<!-- ============ TOAST ============ -->
+<div id="toast" class="toast hidden"></div>
+
+<!-- Firebase (compat SDKs, no build step needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
+
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
