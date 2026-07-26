@@ -61,7 +61,12 @@ const state = {
   calTechFilter: 'all',
   mapReady: false,
   map: null,
+  mapType: 'hybrid',      // satellite imagery + street labels
   markers: [],
+  myLocation: null,
+  myDot: null,
+  myAccuracyCircle: null,
+  geoWatchId: null,
   tempPin: null,          // {lat,lng} while placing a new pin
   pendingPhotoFile: null,
 };
@@ -632,11 +637,31 @@ function openJobForm(job, presetDate){
 function renderMapView(){
   $('#mapToolbar').innerHTML = `
     <button class="btn-pill" id="btnLocateMe">🎯 My Location</button>
+    <button class="btn-pill" id="btnMapType">${state.mapType === 'roadmap' ? '🛰️ Satellite' : '🗺️ Map View'}</button>
     <span class="btn-pill" style="pointer-events:none;">Tap map to log a door</span>
   `;
   $('#mapLegend').innerHTML = Object.entries(STATUS_META).map(([k,v])=>`
     <span class="map-legend-item"><span class="map-legend-dot" style="background:${v.color}"></span>${v.emoji} ${v.label}</span>
   `).join('');
+
+  // toolbar listeners live here so they survive re-renders
+  $('#btnLocateMe').addEventListener('click', ()=>{
+    if(state.myLocation){
+      state.map.panTo(state.myLocation);
+      state.map.setZoom(18);
+    }else{
+      navigator.geolocation?.getCurrentPosition(pos=>{
+        const here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        state.map.panTo(here);
+        state.map.setZoom(18);
+      }, ()=> toast('Turn on location access to see where you are.'));
+    }
+  });
+  $('#btnMapType').addEventListener('click', ()=>{
+    state.mapType = state.mapType === 'roadmap' ? 'hybrid' : 'roadmap';
+    if(state.map) state.map.setMapTypeId(state.mapType);
+    $('#btnMapType').textContent = state.mapType === 'roadmap' ? '🛰️ Satellite' : '🗺️ Map View';
+  });
 
   if(!window.google || !window.google.maps){
     loadGoogleMaps(initGoogleMap);
@@ -675,26 +700,74 @@ const DARK_MAP_STYLE = [
 function initGoogleMap(){
   const center = { lat: 39.7392, lng: -104.9903 };
   state.map = new google.maps.Map($('#googleMap'), {
-    center, zoom: 14, styles: DARK_MAP_STYLE, disableDefaultUI:true, zoomControl:true, gestureHandling:'greedy'
+    center,
+    zoom: 17,
+    mapTypeId: state.mapType,      // 'hybrid' = satellite imagery WITH street names
+    styles: DARK_MAP_STYLE,        // only applies when toggled back to plain map view
+    disableDefaultUI: true,
+    zoomControl: true,
+    gestureHandling: 'greedy',
+    tilt: 0,
   });
   state.mapReady = true;
   state.geocoder = new google.maps.Geocoder();
-
-  navigator.geolocation?.getCurrentPosition(pos=>{
-    state.map.setCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-  }, ()=>{}, { timeout: 4000 });
 
   state.map.addListener('click', (e)=>{
     openPinForm({ lat: e.latLng.lat(), lng: e.latLng.lng() });
   });
 
   drawMapMarkers();
-  $('#btnLocateMe').addEventListener('click', ()=>{
-    navigator.geolocation?.getCurrentPosition(pos=>{
-      state.map.panTo({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      state.map.setZoom(16);
-    });
-  });
+  startLocationTracking(true);
+}
+
+/* Live "you are here" blue dot that follows you as you walk the street */
+function startLocationTracking(recenterOnFirstFix){
+  if(!navigator.geolocation || !state.map) return;
+  if(state.geoWatchId != null) return; // already tracking
+
+  state.geoWatchId = navigator.geolocation.watchPosition(pos=>{
+    const here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    state.myLocation = here;
+
+    if(!state.myDot){
+      // solid blue dot with a white ring — same visual language as Apple/Google Maps
+      state.myDot = new google.maps.Marker({
+        position: here,
+        map: state.map,
+        zIndex: 9999,
+        title: 'You are here',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 8,
+          fillColor: '#37c8ff',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: 3,
+        },
+      });
+      // soft halo showing GPS accuracy
+      state.myAccuracyCircle = new google.maps.Circle({
+        map: state.map,
+        center: here,
+        radius: pos.coords.accuracy || 20,
+        strokeColor: '#37c8ff',
+        strokeOpacity: 0.35,
+        strokeWeight: 1,
+        fillColor: '#37c8ff',
+        fillOpacity: 0.12,
+        clickable: false,
+        zIndex: 1,
+      });
+      if(recenterOnFirstFix) state.map.panTo(here);
+    }else{
+      state.myDot.setPosition(here);
+      state.myAccuracyCircle.setCenter(here);
+      state.myAccuracyCircle.setRadius(pos.coords.accuracy || 20);
+    }
+  }, err=>{
+    console.warn('geolocation', err);
+    if(err.code === 1) toast('Allow location access to see your dot on the map.');
+  }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
 }
 
 function drawMapMarkers(){
@@ -703,11 +776,20 @@ function drawMapMarkers(){
   state.markers = [];
   state.pins.forEach(pin=>{
     const meta = STATUS_META[pin.status] || STATUS_META.lead;
+    // solid colored dot with white outline — stays readable on top of satellite imagery
+    const HEX = { sale:'#3ee08a', attempted:'#ffcc4d', lead:'#6ea8ff', no:'#ff6b6b' };
     const marker = new google.maps.Marker({
       position: { lat: pin.lat, lng: pin.lng },
       map: state.map,
-      label: { text: meta.emoji, fontSize:'14px' },
       title: `${meta.label}${pin.customerName ? ' · '+pin.customerName : ''}`,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 9,
+        fillColor: HEX[pin.status] || HEX.lead,
+        fillOpacity: 1,
+        strokeColor: '#ffffff',
+        strokeWeight: 2.5,
+      },
     });
     marker.addListener('click', ()=> openPinDetail(pin));
     state.markers.push(marker);
