@@ -18,6 +18,24 @@ const fmtDateLabel = (dateStr) => {
 };
 const escapeHtml = (s='') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/* --- month / recurring helpers --- */
+const DAY_MS = 86400000;
+const monthKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth()+1)}`;
+const monthLabel = (key) => {
+  const [y,m] = key.split('-').map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString('en-US', { month:'short', year:'numeric' });
+};
+const monthLabelLong = (key) => {
+  const [y,m] = key.split('-').map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString('en-US', { month:'long', year:'numeric' });
+};
+const addMonthsTs = (ts, n) => {
+  const d = new Date(ts);
+  d.setMonth(d.getMonth() + n);
+  return d.getTime();
+};
+const daysSince = (ts) => Math.max(0, Math.floor((Date.now() - ts) / DAY_MS));
+
 const TECH_COLORS = ['#37c8ff','#4fe0c4','#ffcc4d','#ff6b6b','#b98bff','#ff9ecb','#8bd17c','#ffa257'];
 const VIBE_OPTIONS = ['😊 Friendly','🧐 Detail-oriented','⏰ In a hurry','🐶 Has pets','💬 Chatty','🤐 Quiet','💰 Price-conscious','✨ Wants it perfect'];
 const STATUS_META = {
@@ -49,8 +67,8 @@ document.addEventListener('click', (e)=>{
 
 /* ---------------- global state ---------------- */
 const state = {
-  currentUser: null,      // { role:'owner'|'tech', techId, name, color, commissionPct }
-  settings: {},           // meta/app doc
+  currentUser: null,
+  settings: {},
   techs: [],
   jobs: [],
   customers: [],
@@ -61,14 +79,17 @@ const state = {
   calTechFilter: 'all',
   mapReady: false,
   map: null,
-  mapType: 'hybrid',      // satellite imagery + street labels
+  mapType: 'hybrid',
   markers: [],
   myLocation: null,
   myDot: null,
   myAccuracyCircle: null,
   geoWatchId: null,
-  tempPin: null,          // {lat,lng} while placing a new pin
+  tempPin: null,
   pendingPhotoFile: null,
+  // recurring / plans
+  plansTab: 'followup',        // 'followup' | 'months'
+  plansSelectedMonth: null,
 };
 
 function calcEarning(job, tech){
@@ -207,6 +228,7 @@ async function submitOwnerLogin(){
       ownerPasscode: code,
       defaultCommissionPct: 20,
       tipsPct: 100,
+      rebookMonths: 4,
       createdAt: Date.now()
     }, { merge:true });
     toast(`Welcome to SqueegeeHQ, ${bizName}! 🎉`);
@@ -284,8 +306,9 @@ const TABS_OWNER = [
   { id:'home', emoji:'🏠', label:'Home' },
   { id:'map', emoji:'📍', label:'Map' },
   { id:'calendar', emoji:'📅', label:'Calendar' },
+  { id:'plans', emoji:'🔁', label:'Plans' },
   { id:'team', emoji:'👥', label:'Team' },
-  { id:'settings', emoji:'⚙️', label:'Settings' },
+  { id:'settings', emoji:'⚙️', label:'More' },
 ];
 const TABS_TECH = [
   { id:'calendar', emoji:'📅', label:'Schedule' },
@@ -296,6 +319,7 @@ const TABS_TECH = [
 function showApp(){
   $('#app').classList.remove('hidden');
   const tabs = state.currentUser.role === 'owner' ? TABS_OWNER : TABS_TECH;
+  $('#tabbar').classList.toggle('tabbar-tight', tabs.length > 5);
   $('#tabbar').innerHTML = tabs.map(t => `
     <button class="tab-item" data-tab="${t.id}">
       <span class="tab-emoji">${t.emoji}</span>${t.label}
@@ -313,7 +337,12 @@ function switchView(viewId){
   $all('.view').forEach(v => v.classList.add('hidden'));
   $(`#view-${viewId}`).classList.remove('hidden');
   $all('.tab-item').forEach(b => b.classList.toggle('active', b.getAttribute('data-tab')===viewId));
-  const titles = { home:['🏠','Home'], map:['📍','Door-to-Door'], calendar:['📅', state.currentUser.role==='owner' ? 'Calendar' : 'My Schedule'], team:['👥','Team'], earnings:['💰','Earnings'], settings:['⚙️','Settings'] };
+  const titles = {
+    home:['🏠','Home'], map:['📍','Door-to-Door'],
+    calendar:['📅', state.currentUser.role==='owner' ? 'Calendar' : 'My Schedule'],
+    plans:['🔁','Recurring Plans'], team:['👥','Team'],
+    earnings:['💰','Earnings'], settings:['⚙️','Settings']
+  };
   const [emoji, label] = titles[viewId] || ['🫧','SqueegeeHQ'];
   $('#topbarEmoji').textContent = emoji;
   $('#topbarTitle').textContent = label;
@@ -326,10 +355,319 @@ function renderCurrentView(){
     case 'home': renderHome(); break;
     case 'map': renderMapView(); break;
     case 'calendar': renderCalendar(); break;
+    case 'plans': renderPlans(); break;
     case 'team': renderTeam(); break;
     case 'earnings': renderEarnings(); break;
     case 'settings': renderSettings(); break;
   }
+}
+
+/* ==========================================================
+   RECURRING / PLANS ENGINE
+   Derived live from completed jobs — no separate collection,
+   so all your existing job history feeds it automatically.
+   ========================================================== */
+
+function rebookCycle(){ return Number(state.settings.rebookMonths) || 4; }
+
+function jobCompletedTs(job){
+  if(job.completedAt) return job.completedAt;
+  if(job.date){
+    const [y,m,d] = job.date.split('-').map(Number);
+    return new Date(y, m-1, d).getTime();
+  }
+  return Date.now();
+}
+
+function customerKeyOf(job){
+  return job.customerId || `${(job.customerName||'').toLowerCase().trim()}|${(job.address||'').toLowerCase().trim()}`;
+}
+
+/* One entry per CUSTOMER (their most recent completed clean),
+   so a house cleaned 3 times shows up once, not three times. */
+function buildPlanEntries(){
+  const latest = new Map();
+  state.jobs.filter(j => j.status === 'completed').forEach(j=>{
+    const key = customerKeyOf(j);
+    const ts = jobCompletedTs(j);
+    const prev = latest.get(key);
+    if(!prev || ts > prev.ts) latest.set(key, { key, job:j, ts });
+  });
+
+  const cycle = rebookCycle();
+  const now = Date.now();
+
+  return Array.from(latest.values()).map(e=>{
+    const cycleForThis = Number(e.job.rebookMonths) || cycle;
+    const dueTs = addMonthsTs(e.ts, cycleForThis);
+    const days = daysSince(e.ts);
+    // already back on the books?
+    const rebooked = state.jobs.some(j =>
+      j.status === 'scheduled' && customerKeyOf(j) === e.key && jobCompletedTs(j) > e.ts
+    );
+    let urgency = 'later';
+    if(now >= dueTs) urgency = 'due';
+    else if(dueTs - now <= 30 * DAY_MS) urgency = 'soon';
+
+    return {
+      ...e,
+      cycleForThis,
+      dueTs,
+      dueMonth: monthKey(new Date(dueTs)),
+      days,
+      rebooked,
+      urgency,
+      lastContactedAt: e.job.lastContactedAt || null,
+    };
+  });
+}
+
+function renderPlans(){
+  const el = $('#plansContent');
+  const entries = buildPlanEntries();
+  const cycle = rebookCycle();
+
+  if(entries.length === 0){
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-emoji">🔁</div>
+        <div style="font-weight:800; color:var(--text-dim); margin-bottom:6px;">No recurring clients yet</div>
+        <div style="font-size:13px;">As soon as a tech marks a job complete, that customer lands here on a ${cycle}-month rebooking clock.</div>
+      </div>`;
+    return;
+  }
+
+  const active = entries.filter(e=>!e.rebooked);
+  const dueNow = active.filter(e=>e.urgency==='due');
+  const potentialDue = dueNow.reduce((s,e)=> s + (Number(e.job.price)||0), 0);
+  const pipeline12mo = entries.reduce((s,e)=> s + (Number(e.job.price)||0), 0);
+
+  el.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-emoji">🔔</div><div class="stat-value">${dueNow.length}</div><div class="stat-label">Ready to Reach Out</div></div>
+      <div class="stat-card"><div class="stat-emoji">💵</div><div class="stat-value">${fmtMoney(potentialDue)}</div><div class="stat-label">Sitting on the Table</div></div>
+      <div class="stat-card"><div class="stat-emoji">👥</div><div class="stat-value">${entries.length}</div><div class="stat-label">Past Clients</div></div>
+      <div class="stat-card"><div class="stat-emoji">📈</div><div class="stat-value">${fmtMoney(pipeline12mo)}</div><div class="stat-label">Full Rebook Value</div></div>
+    </div>
+
+    <div class="tech-filter-row" style="margin-top:16px;">
+      <button class="btn-pill ${state.plansTab==='followup'?'active':''}" data-plans-tab="followup">🔥 Follow Up</button>
+      <button class="btn-pill ${state.plansTab==='months'?'active':''}" data-plans-tab="months">📆 By Month</button>
+    </div>
+
+    <div id="plansBody"></div>
+  `;
+
+  $all('[data-plans-tab]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      state.plansTab = btn.getAttribute('data-plans-tab');
+      renderPlans();
+    });
+  });
+
+  if(state.plansTab === 'followup') renderPlansFollowUp(entries);
+  else renderPlansMonths(entries);
+}
+
+/* ---- Follow-up list: longest-since-cleaned first ---- */
+function renderPlansFollowUp(entries){
+  const body = $('#plansBody');
+  const cycle = rebookCycle();
+
+  const active = entries.filter(e=>!e.rebooked).sort((a,b)=> b.days - a.days);
+  const booked = entries.filter(e=>e.rebooked);
+
+  if(active.length === 0){
+    body.innerHTML = `<div class="empty-state"><div class="empty-emoji">🎉</div>Everyone's already rebooked. Great work.</div>`;
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="section-title">Priority — longest since cleaned</div>
+    ${active.map(e=>planCardHtml(e)).join('')}
+    ${booked.length ? `<div class="section-title">Already Rebooked ✅</div>${booked.map(e=>planCardHtml(e)).join('')}` : ''}
+    <p style="text-align:center; color:var(--text-faint); font-size:12px; margin-top:18px;">
+      Rebooking cycle is ${cycle} months — change it in Settings.
+    </p>
+  `;
+  attachPlanCardHandlers(body);
+}
+
+function planCardHtml(e){
+  const j = e.job;
+  const urgencyClass = e.rebooked ? 'plan-booked' : `plan-${e.urgency}`;
+  const dot = e.rebooked ? '#3ee08a' : (e.urgency==='due' ? '#ff6b6b' : e.urgency==='soon' ? '#ffcc4d' : '#6ea8ff');
+  const contacted = e.lastContactedAt
+    ? `<span class="plan-contacted">📞 ${daysSince(e.lastContactedAt)}d ago</span>` : '';
+  return `
+    <button class="job-card plan-card ${urgencyClass}" data-plan-key="${escapeHtml(e.key)}">
+      <span class="job-dot" style="background:${dot}"></span>
+      <span class="job-info">
+        <span class="job-name">${escapeHtml(j.customerName || 'Customer')}</span>
+        <span class="job-sub">${escapeHtml(j.address || 'no address')}</span>
+        <span class="plan-meta">
+          <span class="plan-days">${e.days} days since cleaned</span>
+          ${contacted}
+        </span>
+      </span>
+      <span style="text-align:right; flex-shrink:0;">
+        <span class="job-price">${fmtMoney(j.price)}</span>
+        <span class="plan-due">${e.rebooked ? 'booked' : monthLabel(e.dueMonth)}</span>
+      </span>
+    </button>`;
+}
+
+function attachPlanCardHandlers(root){
+  $all('[data-plan-key]', root).forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const key = btn.getAttribute('data-plan-key');
+      const entry = buildPlanEntries().find(e=>e.key === key);
+      if(entry) openPlanDetail(entry);
+    });
+  });
+}
+
+/* ---- Month calendar: months only, no individual days ---- */
+function renderPlansMonths(entries){
+  const body = $('#plansBody');
+  const now = new Date();
+  const startKey = monthKey(now);
+
+  // build 12 months forward from this month
+  const months = [];
+  for(let i=0; i<12; i++){
+    const d = new Date(now.getFullYear(), now.getMonth()+i, 1);
+    months.push(monthKey(d));
+  }
+
+  // anything overdue (due month already passed) rolls into the current month bucket
+  const bucket = {};
+  months.forEach(m => bucket[m] = []);
+  entries.forEach(e=>{
+    if(e.rebooked) return;
+    const k = (e.dueMonth < startKey) ? startKey : e.dueMonth;
+    if(bucket[k]) bucket[k].push(e);
+  });
+
+  if(!state.plansSelectedMonth || !bucket[state.plansSelectedMonth]) state.plansSelectedMonth = startKey;
+
+  body.innerHTML = `
+    <div class="section-title">Potential rebookings by month</div>
+    <div class="month-grid">
+      ${months.map(m=>{
+        const list = bucket[m];
+        const revenue = list.reduce((s,e)=> s + (Number(e.job.price)||0), 0);
+        const isSel = m === state.plansSelectedMonth;
+        const isNow = m === startKey;
+        return `
+          <button class="month-card ${isSel?'selected':''} ${isNow?'is-now':''}" data-month="${m}">
+            <span class="month-name">${monthLabel(m).split(' ')[0]}</span>
+            <span class="month-year">${m.split('-')[0]}</span>
+            <span class="month-count">${list.length}</span>
+            <span class="month-rev">${revenue ? fmtMoney(revenue) : '—'}</span>
+          </button>`;
+      }).join('')}
+    </div>
+    <div class="section-title">${monthLabelLong(state.plansSelectedMonth)}${state.plansSelectedMonth===startKey ? ' · includes anyone overdue' : ''}</div>
+    <div id="monthList"></div>
+  `;
+
+  $all('[data-month]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      state.plansSelectedMonth = btn.getAttribute('data-month');
+      renderPlans();
+    });
+  });
+
+  const list = bucket[state.plansSelectedMonth].sort((a,b)=> b.days - a.days);
+  const listEl = $('#monthList');
+  if(list.length === 0){
+    listEl.innerHTML = `<div class="empty-state"><div class="empty-emoji">🗓️</div>Nobody due this month.</div>`;
+  }else{
+    const rev = list.reduce((s,e)=> s + (Number(e.job.price)||0), 0);
+    listEl.innerHTML = `
+      <div class="card" style="text-align:center; padding:14px;">
+        <b style="font-size:20px; color:var(--accent-2);">${fmtMoney(rev)}</b>
+        <div style="font-size:12px; color:var(--text-dim); margin-top:2px;">potential revenue from ${list.length} client${list.length===1?'':'s'}</div>
+      </div>
+      ${list.map(e=>planCardHtml(e)).join('')}`;
+    attachPlanCardHandlers(listEl);
+  }
+}
+
+function openPlanDetail(e){
+  const j = e.job;
+  const phone = (state.customers.find(c=>c.id===j.customerId)||{}).phone || '';
+  const urgencyText = e.rebooked ? '✅ Already rebooked'
+    : e.urgency==='due' ? '🔴 Ready to reach out now'
+    : e.urgency==='soon' ? '🟡 Coming due soon'
+    : '🔵 Not due yet';
+
+  openModal(`
+    <div class="modal-title">${escapeHtml(j.customerName||'Customer')}</div>
+    <div style="color:var(--text-dim); font-size:13px; margin-bottom:12px;">${escapeHtml(j.address||'')}</div>
+    ${j.photoURL ? `<img src="${j.photoURL}" class="photo-preview" />` : ''}
+
+    <div class="earn-highlight">
+      <div class="earn-amt">${e.days}</div>
+      <div class="earn-label">days since last cleaned</div>
+    </div>
+
+    <div class="card">
+      <div class="card-row"><span style="color:var(--text-dim);">Status</span><b>${urgencyText}</b></div>
+      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Last cleaned</span><b>${new Date(e.ts).toLocaleDateString()}</b></div>
+      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Due month</span><b>${monthLabelLong(e.dueMonth)}</b></div>
+      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Last job value</span><b>${fmtMoney(j.price)}</b></div>
+      ${e.lastContactedAt ? `<div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Last contacted</span><b>${daysSince(e.lastContactedAt)} days ago</b></div>` : ''}
+    </div>
+
+    ${j.vibes && j.vibes.length ? `<div class="vibe-tags">${j.vibes.map(v=>`<span class="vibe-tag selected">${v}</span>`).join('')}</div>` : ''}
+    ${j.notes ? `<div class="card" style="margin-top:12px;"><div style="font-size:12px; color:var(--text-dim); margin-bottom:4px; font-weight:700;">NOTES</div>${escapeHtml(j.notes)}</div>` : ''}
+
+    ${phone ? `<a href="tel:${escapeHtml(phone)}" class="btn-secondary btn-block" style="text-align:center; text-decoration:none; margin-top:14px; display:block;">📞 Call ${escapeHtml(phone)}</a>` : ''}
+    <button class="btn-primary" id="btnBookAgain">📅 Book Them Again</button>
+    <button class="btn-secondary" id="btnMarkContacted">📞 Mark as Reached Out</button>
+    <button class="btn-secondary" id="btnCustomCycle">⏱️ Change Their Cycle (${e.cycleForThis} mo)</button>
+  `);
+
+  $('#btnBookAgain').addEventListener('click', ()=>{
+    closeModal();
+    openJobForm(null, todayStr(), {
+      customerName: j.customerName, address: j.address, price: j.price,
+      vibes: j.vibes || [], notes: j.notes || '', photoURL: j.photoURL || null,
+      lat: j.lat || null, lng: j.lng || null, customerId: j.customerId || null,
+    });
+  });
+  $('#btnMarkContacted').addEventListener('click', async ()=>{
+    await db.collection('jobs').doc(j.id).update({ lastContactedAt: Date.now() });
+    closeModal();
+    toast('Logged — nice follow-up 📞');
+  });
+  $('#btnCustomCycle').addEventListener('click', ()=>{
+    closeModal();
+    openCycleForm(j, e.cycleForThis);
+  });
+}
+
+function openCycleForm(job, current){
+  openModal(`
+    <div class="modal-title">Rebooking Cycle</div>
+    <p style="color:var(--text-dim); font-size:13.5px; line-height:1.5;">
+      How often does <b>${escapeHtml(job.customerName||'this customer')}</b> want their windows done?
+      This only changes them — everyone else stays on your ${rebookCycle()}-month default.
+    </p>
+    <div class="form-row">
+      <label class="field-label">Months between cleans: <span id="cycleLabel">${current}</span></label>
+      <input id="cycleRange" type="range" min="1" max="24" value="${current}" />
+    </div>
+    <button class="btn-primary" id="cycleSave">Save</button>
+  `);
+  $('#cycleRange').addEventListener('input', ()=> $('#cycleLabel').textContent = $('#cycleRange').value);
+  $('#cycleSave').addEventListener('click', async ()=>{
+    await db.collection('jobs').doc(job.id).update({ rebookMonths: Number($('#cycleRange').value) });
+    closeModal();
+    toast('Cycle updated ⏱️');
+  });
 }
 
 /* ---------------- HOME (owner dashboard) ---------------- */
@@ -346,6 +684,8 @@ function renderHome(){
   const leadsToday = state.pins.filter(p => ymd(new Date(p.timestamp)) === today).length;
   const salesThisWeek = state.pins.filter(p => p.status==='sale' && p.timestamp >= weekStart.getTime()).length;
 
+  const dueNow = buildPlanEntries().filter(e => !e.rebooked && e.urgency === 'due');
+
   el.innerHTML = `
     <div class="section-title">Today · ${fmtDateLabel(today)}</div>
     <div class="stat-grid">
@@ -355,9 +695,29 @@ function renderHome(){
       <div class="stat-card"><div class="stat-emoji">🎉</div><div class="stat-value">${salesThisWeek}</div><div class="stat-label">Sales This Week</div></div>
     </div>
 
+    ${dueNow.length ? `
+      <button class="card rebook-banner" id="rebookBanner">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="font-size:26px;">🔁</span>
+          <span style="text-align:left; flex:1;">
+            <span style="display:block; font-weight:800;">${dueNow.length} client${dueNow.length===1?'':'s'} ready to rebook</span>
+            <span style="display:block; font-size:12.5px; color:var(--text-dim); margin-top:2px;">
+              ${fmtMoney(dueNow.reduce((s,e)=>s+(Number(e.job.price)||0),0))} sitting on the table
+            </span>
+          </span>
+          <span style="color:var(--accent);">›</span>
+        </div>
+      </button>` : ''}
+
     <div class="section-title">Today's Schedule</div>
     <div id="homeTodayList"></div>
   `;
+
+  if($('#rebookBanner')) $('#rebookBanner').addEventListener('click', ()=>{
+    state.plansTab = 'followup';
+    switchView('plans');
+  });
+
   const list = $('#homeTodayList');
   if(todaysJobs.length === 0){
     list.innerHTML = `<div class="empty-state"><div class="empty-emoji">☀️</div>Nothing on the books today.</div>`;
@@ -397,7 +757,7 @@ function renderCalendar(){
   const el = $('#calendarContent');
   const cursor = state.calMonthCursor;
   const year = cursor.getFullYear(), month = cursor.getMonth();
-  const monthLabel = cursor.toLocaleDateString('en-US', { month:'long', year:'numeric' });
+  const mLabel = cursor.toLocaleDateString('en-US', { month:'long', year:'numeric' });
 
   const firstOfMonth = new Date(year, month, 1);
   const startWeekday = firstOfMonth.getDay();
@@ -414,7 +774,7 @@ function renderCalendar(){
   el.innerHTML = `
     <div class="cal-header">
       <button class="cal-nav-btn" id="calPrev">‹</button>
-      <div class="cal-month-label">${monthLabel}</div>
+      <div class="cal-month-label">${mLabel}</div>
       <button class="cal-nav-btn" id="calNext">›</button>
     </div>
     ${isOwner ? `<div class="tech-filter-row" id="techFilterRow"></div>` : ''}
@@ -472,6 +832,10 @@ function openJobDetail(job){
     ? `https://www.google.com/maps/dir/?api=1&destination=${job.lat},${job.lng}`
     : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.address||'')}`;
 
+  const isDone = job.status === 'completed';
+  const doneTs = isDone ? jobCompletedTs(job) : null;
+  const cyc = Number(job.rebookMonths) || rebookCycle();
+
   openModal(`
     <div class="modal-title">${escapeHtml(job.customerName||'Job')}</div>
     <div style="color:var(--text-dim); font-size:13px; margin-bottom:10px;">${escapeHtml(job.address||'No address')}</div>
@@ -488,6 +852,10 @@ function openJobDetail(job){
       <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Tech</span><b>${tech?escapeHtml(tech.name):'Unassigned'}</b></div>
       <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Tip</span><b>${fmtMoney(job.tip||0)}</b></div>
       <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Status</span><b style="text-transform:capitalize;">${job.status}</b></div>
+      ${isDone ? `
+        <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Since cleaned</span><b>${daysSince(doneTs)} days</b></div>
+        <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Rebook in</span><b>${monthLabelLong(monthKey(new Date(addMonthsTs(doneTs, cyc))))}</b></div>
+      ` : ''}
     </div>
 
     ${job.vibes && job.vibes.length ? `<div class="vibe-tags">${job.vibes.map(v=>`<span class="vibe-tag selected">${v}</span>`).join('')}</div>` : ''}
@@ -497,6 +865,7 @@ function openJobDetail(job){
 
     ${(isMine && job.status==='scheduled') ? `<button class="btn-primary" id="btnMarkComplete">✅ Mark Job Complete</button>` : ''}
     ${(isOwner) ? `
+      ${isDone ? `<button class="btn-primary" id="btnBookAgainJob">🔁 Book Them Again</button>` : ''}
       <button class="btn-secondary" id="btnEditJob">✏️ Edit Job</button>
       <button class="btn-secondary btn-danger" id="btnDeleteJob">🗑️ Delete Job</button>
     ` : ''}
@@ -504,6 +873,14 @@ function openJobDetail(job){
 
   if($('#btnMarkComplete')) $('#btnMarkComplete').addEventListener('click', ()=> openCompleteJobFlow(job));
   if($('#btnEditJob')) $('#btnEditJob').addEventListener('click', ()=>{ closeModal(); openJobForm(job); });
+  if($('#btnBookAgainJob')) $('#btnBookAgainJob').addEventListener('click', ()=>{
+    closeModal();
+    openJobForm(null, todayStr(), {
+      customerName: job.customerName, address: job.address, price: job.price,
+      vibes: job.vibes || [], notes: job.notes || '', photoURL: job.photoURL || null,
+      lat: job.lat || null, lng: job.lng || null, customerId: job.customerId || null,
+    });
+  });
   if($('#btnDeleteJob')) $('#btnDeleteJob').addEventListener('click', async ()=>{
     if(confirm('Delete this job? This cannot be undone.')){
       await db.collection('jobs').doc(job.id).delete();
@@ -514,6 +891,7 @@ function openJobDetail(job){
 }
 
 function openCompleteJobFlow(job){
+  const cyc = Number(job.rebookMonths) || rebookCycle();
   openModal(`
     <div class="modal-title">Nice work! 🎉</div>
     <p style="color:var(--text-dim); font-size:14px;">Any tip from the customer?</p>
@@ -521,30 +899,36 @@ function openCompleteJobFlow(job){
       <label class="field-label">Tip Amount ($)</label>
       <input id="tipInput" class="bubble-input" type="number" min="0" step="1" placeholder="0" />
     </div>
+    <div class="card" style="font-size:13px; color:var(--text-dim); line-height:1.5;">
+      🔁 This customer will pop up in <b style="color:var(--text);">Plans</b> for rebooking in about <b style="color:var(--text);">${cyc} months</b>.
+    </div>
     <button class="btn-primary" id="btnConfirmComplete">Mark Complete</button>
   `);
   $('#btnConfirmComplete').addEventListener('click', async ()=>{
     const tip = Number($('#tipInput').value) || 0;
     await db.collection('jobs').doc(job.id).update({ status:'completed', tip, completedAt: Date.now() });
     closeModal();
-    toast('Job marked complete — nice! 🫧');
+    toast('Job complete — added to your rebooking list 🫧');
   });
 }
 
-function openJobForm(job, presetDate){
+function openJobForm(job, presetDate, prefill){
   const isEdit = !!job;
+  const p = prefill || {};
+  const v = (field, fallback='') => (job ? (job[field] ?? fallback) : (p[field] ?? fallback));
+
   openModal(`
-    <div class="modal-title">${isEdit ? 'Edit Job' : 'Schedule a Job'}</div>
+    <div class="modal-title">${isEdit ? 'Edit Job' : (prefill ? 'Rebook Customer' : 'Schedule a Job')}</div>
     <div class="form-row">
       <label class="field-label">Customer Name</label>
-      <input id="jfName" class="bubble-input" value="${escapeHtml(job?.customerName||'')}" />
+      <input id="jfName" class="bubble-input" value="${escapeHtml(v('customerName'))}" />
     </div>
     <div class="form-row">
       <label class="field-label">Address</label>
-      <input id="jfAddress" class="bubble-input" value="${escapeHtml(job?.address||'')}" />
+      <input id="jfAddress" class="bubble-input" value="${escapeHtml(v('address'))}" />
     </div>
     <div class="form-row form-row-2">
-      <div><label class="field-label">Price ($)</label><input id="jfPrice" type="number" min="0" class="bubble-input" value="${job?.price||''}" /></div>
+      <div><label class="field-label">Price ($)</label><input id="jfPrice" type="number" min="0" class="bubble-input" value="${v('price','')}" /></div>
       <div><label class="field-label">Assign Tech</label>
         <select id="jfTech" class="bubble-input">
           <option value="">Unassigned</option>
@@ -559,28 +943,28 @@ function openJobForm(job, presetDate){
     <div class="form-row">
       <label class="field-label">Customer Vibes</label>
       <div class="vibe-tags" id="jfVibes">
-        ${VIBE_OPTIONS.map(v=>`<button type="button" class="vibe-tag ${job?.vibes?.includes(v)?'selected':''}" data-vibe="${v}">${v}</button>`).join('')}
+        ${VIBE_OPTIONS.map(o=>`<button type="button" class="vibe-tag ${(v('vibes',[])||[]).includes(o)?'selected':''}" data-vibe="${o}">${o}</button>`).join('')}
       </div>
     </div>
     <div class="form-row">
       <label class="field-label">Notes</label>
-      <textarea id="jfNotes" class="bubble-input">${escapeHtml(job?.notes||'')}</textarea>
+      <textarea id="jfNotes" class="bubble-input">${escapeHtml(v('notes'))}</textarea>
     </div>
     <div class="form-row">
       <label class="field-label">House Photo</label>
-      <div id="jfPhotoUpload" class="photo-upload">${job?.photoURL ? 'Tap to replace photo' : '📷 Tap to add a photo so techs know where to go'}</div>
-      ${job?.photoURL ? `<img src="${job.photoURL}" class="photo-preview" id="jfPhotoPreview" />` : `<img class="photo-preview hidden" id="jfPhotoPreview" />`}
+      <div id="jfPhotoUpload" class="photo-upload">${v('photoURL') ? 'Tap to replace photo' : '📷 Tap to add a photo so techs know where to go'}</div>
+      ${v('photoURL') ? `<img src="${v('photoURL')}" class="photo-preview" id="jfPhotoPreview" />` : `<img class="photo-preview hidden" id="jfPhotoPreview" />`}
       <input type="file" id="jfPhotoInput" accept="image/*" capture="environment" class="hidden" />
     </div>
     <button class="btn-primary" id="jfSave">${isEdit ? 'Save Changes' : 'Schedule Job'}</button>
   `);
 
-  let selectedVibes = new Set(job?.vibes || []);
+  let selectedVibes = new Set(v('vibes',[]) || []);
   $all('[data-vibe]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      const v = btn.getAttribute('data-vibe');
-      if(selectedVibes.has(v)){ selectedVibes.delete(v); btn.classList.remove('selected'); }
-      else{ selectedVibes.add(v); btn.classList.add('selected'); }
+      const val = btn.getAttribute('data-vibe');
+      if(selectedVibes.has(val)){ selectedVibes.delete(val); btn.classList.remove('selected'); }
+      else{ selectedVibes.add(val); btn.classList.add('selected'); }
     });
   });
 
@@ -599,7 +983,7 @@ function openJobForm(job, presetDate){
     const name = $('#jfName').value.trim();
     if(!name){ toast('Add a customer name first.'); return; }
     $('#jfSave').textContent = 'Saving…';
-    let photoURL = job?.photoURL || null;
+    let photoURL = v('photoURL', null) || null;
     if(state.pendingPhotoFile){
       photoURL = await uploadPhoto(state.pendingPhotoFile, 'job-photos');
     }
@@ -617,8 +1001,8 @@ function openJobForm(job, presetDate){
       notes: $('#jfNotes').value.trim(),
       photoURL,
       status: job?.status || 'scheduled',
-      lat: job?.lat || null,
-      lng: job?.lng || null,
+      lat: v('lat', null),
+      lng: v('lng', null),
     };
     if(isEdit){
       await db.collection('jobs').doc(job.id).update(payload);
@@ -626,8 +1010,9 @@ function openJobForm(job, presetDate){
     }else{
       payload.tip = 0;
       payload.createdAt = Date.now();
+      if(p.customerId) payload.customerId = p.customerId;
       await db.collection('jobs').add(payload);
-      toast('Job scheduled 🎉');
+      toast(prefill ? 'Rebooked! 🔁' : 'Job scheduled 🎉');
     }
     closeModal();
   });
@@ -644,7 +1029,6 @@ function renderMapView(){
     <span class="map-legend-item"><span class="map-legend-dot" style="background:${v.color}"></span>${v.emoji} ${v.label}</span>
   `).join('');
 
-  // toolbar listeners live here so they survive re-renders
   $('#btnLocateMe').addEventListener('click', ()=>{
     if(state.myLocation){
       state.map.panTo(state.myLocation);
@@ -702,8 +1086,8 @@ function initGoogleMap(){
   state.map = new google.maps.Map($('#googleMap'), {
     center,
     zoom: 17,
-    mapTypeId: state.mapType,      // 'hybrid' = satellite imagery WITH street names
-    styles: DARK_MAP_STYLE,        // only applies when toggled back to plain map view
+    mapTypeId: state.mapType,
+    styles: DARK_MAP_STYLE,
     disableDefaultUI: true,
     zoomControl: true,
     gestureHandling: 'greedy',
@@ -720,17 +1104,15 @@ function initGoogleMap(){
   startLocationTracking(true);
 }
 
-/* Live "you are here" blue dot that follows you as you walk the street */
 function startLocationTracking(recenterOnFirstFix){
   if(!navigator.geolocation || !state.map) return;
-  if(state.geoWatchId != null) return; // already tracking
+  if(state.geoWatchId != null) return;
 
   state.geoWatchId = navigator.geolocation.watchPosition(pos=>{
     const here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
     state.myLocation = here;
 
     if(!state.myDot){
-      // solid blue dot with a white ring — same visual language as Apple/Google Maps
       state.myDot = new google.maps.Marker({
         position: here,
         map: state.map,
@@ -745,7 +1127,6 @@ function startLocationTracking(recenterOnFirstFix){
           strokeWeight: 3,
         },
       });
-      // soft halo showing GPS accuracy
       state.myAccuracyCircle = new google.maps.Circle({
         map: state.map,
         center: here,
@@ -774,10 +1155,9 @@ function drawMapMarkers(){
   if(!state.map) return;
   state.markers.forEach(m => m.setMap(null));
   state.markers = [];
+  const HEX = { sale:'#3ee08a', attempted:'#ffcc4d', lead:'#6ea8ff', no:'#ff6b6b' };
   state.pins.forEach(pin=>{
     const meta = STATUS_META[pin.status] || STATUS_META.lead;
-    // solid colored dot with white outline — stays readable on top of satellite imagery
-    const HEX = { sale:'#3ee08a', attempted:'#ffcc4d', lead:'#6ea8ff', no:'#ff6b6b' };
     const marker = new google.maps.Marker({
       position: { lat: pin.lat, lng: pin.lng },
       map: state.map,
@@ -1060,10 +1440,10 @@ function renderEarnings(){
   const now = new Date();
   const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
   const weekStartStr = ymd(weekStart);
-  const monthStr = todayStr().slice(0,7);
+  const mStr = todayStr().slice(0,7);
 
   const weekJobs = myJobs.filter(j => j.date >= weekStartStr);
-  const monthJobs = myJobs.filter(j => j.date.startsWith(monthStr));
+  const monthJobs = myJobs.filter(j => j.date.startsWith(mStr));
   const weekTotal = weekJobs.reduce((s,j)=> s + calcEarning(j, tech), 0);
   const monthTotal = monthJobs.reduce((s,j)=> s + calcEarning(j, tech), 0);
 
@@ -1111,6 +1491,8 @@ function renderSettings(){
         <input id="setDefaultPct" class="bubble-input" type="number" min="0" max="100" value="${state.settings.defaultCommissionPct ?? 20}" />
         <label class="field-label">Tips Policy (% of tips tech keeps)</label>
         <input id="setTipsPct" class="bubble-input" type="number" min="0" max="100" value="${state.settings.tipsPct ?? 100}" />
+        <label class="field-label">Rebooking Cycle (months between cleans)</label>
+        <input id="setRebook" class="bubble-input" type="number" min="1" max="24" value="${state.settings.rebookMonths ?? 4}" />
         <button class="btn-primary" id="btnSaveBiz">Save</button>
       </div>
       <div class="section-title">Security</div>
@@ -1127,6 +1509,7 @@ function renderSettings(){
         businessName: $('#setBizName').value.trim(),
         defaultCommissionPct: Number($('#setDefaultPct').value)||20,
         tipsPct: Number($('#setTipsPct').value)||100,
+        rebookMonths: Number($('#setRebook').value)||4,
       }, { merge:true });
       toast('Saved!');
     });

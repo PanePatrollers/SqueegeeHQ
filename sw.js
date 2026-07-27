@@ -1,7 +1,7 @@
 /* Minimal service worker: caches the app shell so the icon/launch
    doesn't feel broken with no signal. Live data always comes from
    Firebase over the network, not from this cache. */
-const CACHE = 'squeegeehq-v2';
+const CACHE = 'squeegeehq-v3';
 const SHELL = ['./index.html','./styles.css','./app.js','./firebase-config.js','./manifest.json'];
 
 self.addEventListener('install', e=>{
