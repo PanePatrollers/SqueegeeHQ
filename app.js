@@ -43,7 +43,15 @@ const STATUS_META = {
   attempted: { label:'Attempted', emoji:'🟡', color:'var(--attempted)' },
   lead:      { label:'Lead',      emoji:'🔵', color:'var(--lead)' },
   no:        { label:'No',        emoji:'❌', color:'var(--no)' },
+  nosolicit: { label:'No Solicit',emoji:'🚫', color:'var(--nosolicit)' },
 };
+/* hex versions for map markers + charts */
+const STATUS_HEX = {
+  sale:'#3ee08a', attempted:'#ffcc4d', lead:'#6ea8ff', no:'#ff6b6b', nosolicit:'#0b0f16'
+};
+/* No-soliciting doors are excluded from every conversion rate —
+   you never knocked them, so they shouldn't drag your numbers down. */
+const COUNTED_STATUSES = ['sale','attempted','lead','no'];
 
 function toast(msg, ms=2400){
   const t = $('#toast');
@@ -90,7 +98,41 @@ const state = {
   // recurring / plans
   plansTab: 'followup',        // 'followup' | 'months'
   plansSelectedMonth: null,
+  // stats
+  statsRange: 'all',           // 'all' | '30' | '7'
+  // lasso
+  lassoActive: false,
+  lassoLayer: null,
+  lassoSvg: null,
+  lassoPts: [],
+  lassoDrawing: false,
+  projOverlay: null,
 };
+
+/* ---------------- door-to-door stat math ---------------- */
+function doorStats(pins){
+  const c = { sale:0, attempted:0, lead:0, no:0, nosolicit:0 };
+  pins.forEach(p => { if(c[p.status] !== undefined) c[p.status]++; });
+
+  const knocked = c.sale + c.attempted + c.lead + c.no;   // no-soliciting excluded
+  const answered = c.sale + c.lead + c.no;                 // someone came to the door
+  const interested = c.sale + c.lead;
+
+  const pct = (a,b) => b > 0 ? (a/b*100) : 0;
+
+  return {
+    ...c,
+    knocked, answered, interested,
+    totalLogged: pins.length,
+    answerRate:  pct(answered, knocked),
+    closeRate:   pct(c.sale, answered),
+    leadRate:    pct(c.lead, answered),
+    noRate:      pct(c.no, answered),
+    doorToSale:  pct(c.sale, knocked),
+    interestRate: pct(interested, answered),
+  };
+}
+const pctStr = n => `${n.toFixed(1)}%`;
 
 function calcEarning(job, tech){
   const commissionPct = (tech ? tech.commissionPct : state.settings.defaultCommissionPct) ?? 20;
@@ -307,7 +349,7 @@ const TABS_OWNER = [
   { id:'map', emoji:'📍', label:'Map' },
   { id:'calendar', emoji:'📅', label:'Calendar' },
   { id:'plans', emoji:'🔁', label:'Plans' },
-  { id:'team', emoji:'👥', label:'Team' },
+  { id:'stats', emoji:'📊', label:'Stats' },
   { id:'settings', emoji:'⚙️', label:'More' },
 ];
 const TABS_TECH = [
@@ -340,8 +382,9 @@ function switchView(viewId){
   const titles = {
     home:['🏠','Home'], map:['📍','Door-to-Door'],
     calendar:['📅', state.currentUser.role==='owner' ? 'Calendar' : 'My Schedule'],
-    plans:['🔁','Recurring Plans'], team:['👥','Team'],
-    earnings:['💰','Earnings'], settings:['⚙️','Settings']
+    plans:['🔁','Recurring Plans'], stats:['📊','Knock Stats'], team:['👥','Team'],
+    earnings:['💰','Earnings'],
+    settings:['⚙️', state.currentUser.role==='owner' ? 'More' : 'Settings']
   };
   const [emoji, label] = titles[viewId] || ['🫧','SqueegeeHQ'];
   $('#topbarEmoji').textContent = emoji;
@@ -356,6 +399,7 @@ function renderCurrentView(){
     case 'map': renderMapView(); break;
     case 'calendar': renderCalendar(); break;
     case 'plans': renderPlans(); break;
+    case 'stats': renderStats(); break;
     case 'team': renderTeam(); break;
     case 'earnings': renderEarnings(); break;
     case 'settings': renderSettings(); break;
@@ -667,6 +711,192 @@ function openCycleForm(job, current){
     await db.collection('jobs').doc(job.id).update({ rebookMonths: Number($('#cycleRange').value) });
     closeModal();
     toast('Cycle updated ⏱️');
+  });
+}
+
+/* ==========================================================
+   KNOCK STATS
+   ========================================================== */
+
+function donutSvg(segments, centerTop, centerSub){
+  const total = segments.reduce((s,x)=> s + x.value, 0);
+  const R = 54, C = 2 * Math.PI * R;
+  let offset = 0;
+  const arcs = total === 0
+    ? `<circle cx="70" cy="70" r="${R}" fill="none" stroke="var(--border)" stroke-width="18" />`
+    : segments.filter(s=>s.value>0).map(s=>{
+        const frac = s.value / total;
+        const dash = `${(frac*C).toFixed(2)} ${(C - frac*C).toFixed(2)}`;
+        const el = `<circle cx="70" cy="70" r="${R}" fill="none" stroke="${s.color}" stroke-width="18"
+          stroke-dasharray="${dash}" stroke-dashoffset="${(-offset*C).toFixed(2)}"
+          transform="rotate(-90 70 70)" stroke-linecap="butt" />`;
+        offset += frac;
+        return el;
+      }).join('');
+  return `
+    <svg viewBox="0 0 140 140" class="donut">
+      ${arcs}
+      <text x="70" y="66" text-anchor="middle" class="donut-top">${centerTop}</text>
+      <text x="70" y="86" text-anchor="middle" class="donut-sub">${centerSub}</text>
+    </svg>`;
+}
+
+function funnelRow(label, value, max, color, sublabel){
+  const w = max > 0 ? Math.max(2, (value/max)*100) : 2;
+  return `
+    <div class="funnel-row">
+      <div class="funnel-head">
+        <span class="funnel-label">${label}</span>
+        <span class="funnel-value">${value}${sublabel ? ` <span class="funnel-sub">${sublabel}</span>` : ''}</span>
+      </div>
+      <div class="funnel-track"><div class="funnel-fill" style="width:${w}%; background:${color};"></div></div>
+    </div>`;
+}
+
+function weeklyTrendSvg(pins){
+  const weeks = [];
+  const now = new Date();
+  const startOfWeek = new Date(now); startOfWeek.setHours(0,0,0,0);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  for(let i=7; i>=0; i--){
+    const s = new Date(startOfWeek); s.setDate(startOfWeek.getDate() - i*7);
+    const e = new Date(s); e.setDate(s.getDate() + 7);
+    const inWeek = pins.filter(p => p.timestamp >= s.getTime() && p.timestamp < e.getTime());
+    weeks.push({
+      label: `${s.getMonth()+1}/${s.getDate()}`,
+      knocked: inWeek.filter(p=>COUNTED_STATUSES.includes(p.status)).length,
+      sales: inWeek.filter(p=>p.status==='sale').length,
+    });
+  }
+  const max = Math.max(1, ...weeks.map(w=>w.knocked));
+  const W = 320, H = 130, pad = 18;
+  const bw = (W - pad*2) / weeks.length;
+
+  const bars = weeks.map((w,i)=>{
+    const x = pad + i*bw + bw*0.15;
+    const bwid = bw*0.7;
+    const kh = (w.knocked/max) * (H - 38);
+    const sh = (w.sales/max) * (H - 38);
+    return `
+      <rect x="${x.toFixed(1)}" y="${(H-22-kh).toFixed(1)}" width="${bwid.toFixed(1)}" height="${Math.max(kh,1).toFixed(1)}" rx="3" fill="#2a3346" />
+      <rect x="${x.toFixed(1)}" y="${(H-22-sh).toFixed(1)}" width="${bwid.toFixed(1)}" height="${Math.max(sh,0).toFixed(1)}" rx="3" fill="#3ee08a" />
+      <text x="${(x+bwid/2).toFixed(1)}" y="${H-8}" text-anchor="middle" class="chart-x">${w.label}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" class="trend-chart">${bars}</svg>`;
+}
+
+function renderStats(){
+  const el = $('#statsContent');
+  const range = state.statsRange;
+  const cutoff = range === 'all' ? 0 : Date.now() - Number(range)*DAY_MS;
+  const pins = state.pins.filter(p => p.timestamp >= cutoff);
+  const allPins = state.pins;
+
+  const s = doorStats(pins);
+  const lifetime = doorStats(allPins);
+
+  const segments = [
+    { label:'Sales',     value:s.sale,      color:STATUS_HEX.sale },
+    { label:'Leads',     value:s.lead,      color:STATUS_HEX.lead },
+    { label:'No',        value:s.no,        color:STATUS_HEX.no },
+    { label:'No Answer', value:s.attempted, color:STATUS_HEX.attempted },
+  ];
+
+  // per-person leaderboard
+  const byPerson = {};
+  pins.forEach(p=>{
+    const who = p.createdBy || 'Unknown';
+    byPerson[who] = byPerson[who] || [];
+    byPerson[who].push(p);
+  });
+  const leaderboard = Object.entries(byPerson).map(([name, ps])=>{
+    const st = doorStats(ps);
+    return { name, ...st };
+  }).sort((a,b)=> b.knocked - a.knocked);
+
+  el.innerHTML = `
+    <div class="lifetime-card">
+      <div class="lifetime-num">${lifetime.knocked.toLocaleString()}</div>
+      <div class="lifetime-label">doors knocked, all time</div>
+      <div class="lifetime-sub">
+        ${lifetime.sale.toLocaleString()} sales · ${lifetime.lead.toLocaleString()} leads
+        ${lifetime.nosolicit ? ` · ${lifetime.nosolicit.toLocaleString()} 🚫 skipped` : ''}
+      </div>
+    </div>
+
+    <div class="tech-filter-row">
+      <button class="btn-pill ${range==='all'?'active':''}" data-range="all">All Time</button>
+      <button class="btn-pill ${range==='30'?'active':''}" data-range="30">Last 30 Days</button>
+      <button class="btn-pill ${range==='7'?'active':''}" data-range="7">Last 7 Days</button>
+    </div>
+
+    <div class="section-title">The Big Three</div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-emoji">🚪</div><div class="stat-value">${pctStr(s.answerRate)}</div><div class="stat-label">Answer Rate<br><span class="stat-fine">${s.answered} of ${s.knocked} doors opened</span></div></div>
+      <div class="stat-card"><div class="stat-emoji">🤝</div><div class="stat-value">${pctStr(s.closeRate)}</div><div class="stat-label">Close Rate<br><span class="stat-fine">${s.sale} of ${s.answered} conversations</span></div></div>
+      <div class="stat-card"><div class="stat-emoji">🎯</div><div class="stat-value">${pctStr(s.doorToSale)}</div><div class="stat-label">Door → Sale<br><span class="stat-fine">${s.sale} of ${s.knocked} knocks</span></div></div>
+      <div class="stat-card"><div class="stat-emoji">🔵</div><div class="stat-value">${pctStr(s.leadRate)}</div><div class="stat-label">Lead Rate<br><span class="stat-fine">${s.lead} of ${s.answered} conversations</span></div></div>
+    </div>
+
+    <div class="section-title">Outcome Breakdown</div>
+    <div class="card chart-card">
+      ${donutSvg(segments, s.knocked, 'doors knocked')}
+      <div class="donut-legend">
+        ${segments.map(seg=>`
+          <div class="legend-row">
+            <span class="legend-dot" style="background:${seg.color}"></span>
+            <span class="legend-name">${seg.label}</span>
+            <span class="legend-val">${seg.value} · ${s.knocked?((seg.value/s.knocked)*100).toFixed(0):0}%</span>
+          </div>`).join('')}
+        ${s.nosolicit ? `
+          <div class="legend-row" style="opacity:.6; border-top:1px solid var(--border); margin-top:6px; padding-top:8px;">
+            <span class="legend-dot" style="background:${STATUS_HEX.nosolicit}; border:1px solid var(--border);"></span>
+            <span class="legend-name">No Soliciting</span>
+            <span class="legend-val">${s.nosolicit} · excluded</span>
+          </div>` : ''}
+      </div>
+    </div>
+
+    <div class="section-title">Funnel</div>
+    <div class="card">
+      ${funnelRow('Doors Knocked', s.knocked, s.knocked, 'var(--accent)')}
+      ${funnelRow('Someone Answered', s.answered, s.knocked, '#6ea8ff', pctStr(s.answerRate))}
+      ${funnelRow('Interested (lead + sale)', s.interested, s.knocked, '#4fe0c4', pctStr(s.interestRate))}
+      ${funnelRow('Closed a Sale', s.sale, s.knocked, '#3ee08a', pctStr(s.doorToSale))}
+    </div>
+
+    <div class="section-title">Last 8 Weeks</div>
+    <div class="card">
+      ${weeklyTrendSvg(allPins)}
+      <div class="chart-key">
+        <span><span class="legend-dot" style="background:#2a3346"></span> doors knocked</span>
+        <span><span class="legend-dot" style="background:#3ee08a"></span> sales</span>
+      </div>
+    </div>
+
+    ${leaderboard.length ? `
+      <div class="section-title">By Person</div>
+      ${leaderboard.map(p=>`
+        <div class="card" style="padding:14px;">
+          <div class="card-row"><b>${escapeHtml(p.name)}</b><span class="job-price">${p.sale} sale${p.sale===1?'':'s'}</span></div>
+          <div class="card-row" style="margin-top:8px; font-size:12.5px; color:var(--text-dim);">
+            <span>${p.knocked} knocks</span>
+            <span>${pctStr(p.answerRate)} answered</span>
+            <span>${pctStr(p.doorToSale)} closed</span>
+          </div>
+        </div>`).join('')}` : ''}
+
+    <p style="text-align:center; color:var(--text-faint); font-size:11.5px; margin-top:18px; line-height:1.5;">
+      🚫 No-soliciting doors are logged but excluded from every<br>percentage — they never count against you.
+    </p>
+  `;
+
+  $all('[data-range]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      state.statsRange = btn.getAttribute('data-range');
+      renderStats();
+    });
   });
 }
 
@@ -1022,6 +1252,7 @@ function openJobForm(job, presetDate, prefill){
 function renderMapView(){
   $('#mapToolbar').innerHTML = `
     <button class="btn-pill" id="btnLocateMe">🎯 My Location</button>
+    <button class="btn-pill ${state.lassoActive?'active':''}" id="btnLasso">${state.lassoActive ? '✖️ Cancel' : '🔲 Lasso Area'}</button>
     <button class="btn-pill" id="btnMapType">${state.mapType === 'roadmap' ? '🛰️ Satellite' : '🗺️ Map View'}</button>
     <span class="btn-pill" style="pointer-events:none;">Tap map to log a door</span>
   `;
@@ -1046,6 +1277,7 @@ function renderMapView(){
     if(state.map) state.map.setMapTypeId(state.mapType);
     $('#btnMapType').textContent = state.mapType === 'roadmap' ? '🛰️ Satellite' : '🗺️ Map View';
   });
+  $('#btnLasso').addEventListener('click', toggleLasso);
 
   if(!window.google || !window.google.maps){
     loadGoogleMaps(initGoogleMap);
@@ -1063,7 +1295,7 @@ function loadGoogleMaps(cb){
     return;
   }
   const s = document.createElement('script');
-  s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=places,geocoding`;
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=geometry,places`;
   s.async = true;
   s.onload = cb;
   s.onerror = ()=> toast('Google Maps failed to load — check your API key.');
@@ -1100,8 +1332,166 @@ function initGoogleMap(){
     openPinForm({ lat: e.latLng.lat(), lng: e.latLng.lng() });
   });
 
+  // hidden overlay purely to get a pixel↔latlng projection for the lasso
+  const o = new google.maps.OverlayView();
+  o.onAdd = function(){}; o.draw = function(){}; o.onRemove = function(){};
+  o.setMap(state.map);
+  state.projOverlay = o;
+
   drawMapMarkers();
   startLocationTracking(true);
+}
+
+/* ==========================================================
+   LASSO — circle a neighborhood, get its stats instantly
+   ========================================================== */
+
+function ensureLassoLayer(){
+  if(state.lassoLayer) return state.lassoLayer;
+  const host = $('#googleMap');
+  const layer = document.createElement('div');
+  layer.className = 'lasso-layer';
+  layer.innerHTML = `<svg class="lasso-svg"><polyline class="lasso-path" points="" /></svg>
+    <div class="lasso-hint">Draw a circle around the houses</div>`;
+  host.appendChild(layer);
+  state.lassoLayer = layer;
+  state.lassoSvg = layer.querySelector('.lasso-path');
+
+  const ptFrom = (ev)=>{
+    const r = layer.getBoundingClientRect();
+    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  };
+
+  layer.addEventListener('pointerdown', (ev)=>{
+    if(!state.lassoActive) return;
+    ev.preventDefault();
+    layer.setPointerCapture(ev.pointerId);
+    state.lassoDrawing = true;
+    state.lassoPts = [ptFrom(ev)];
+    state.lassoSvg.setAttribute('points','');
+  });
+
+  layer.addEventListener('pointermove', (ev)=>{
+    if(!state.lassoActive || !state.lassoDrawing) return;
+    ev.preventDefault();
+    const p = ptFrom(ev);
+    const last = state.lassoPts[state.lassoPts.length-1];
+    if(last && Math.hypot(p.x-last.x, p.y-last.y) < 3) return; // thin out
+    state.lassoPts.push(p);
+    state.lassoSvg.setAttribute('points', state.lassoPts.map(q=>`${q.x},${q.y}`).join(' '));
+  });
+
+  const finish = (ev)=>{
+    if(!state.lassoActive || !state.lassoDrawing) return;
+    state.lassoDrawing = false;
+    try{ layer.releasePointerCapture(ev.pointerId); }catch(e){}
+    finishLasso();
+  };
+  layer.addEventListener('pointerup', finish);
+  layer.addEventListener('pointercancel', finish);
+
+  return layer;
+}
+
+function toggleLasso(){
+  if(!state.mapReady){ toast('Map is still loading…'); return; }
+  state.lassoActive = !state.lassoActive;
+  const layer = ensureLassoLayer();
+  layer.classList.toggle('active', state.lassoActive);
+  state.lassoPts = [];
+  if(state.lassoSvg) state.lassoSvg.setAttribute('points','');
+
+  state.map.setOptions({
+    draggable: !state.lassoActive,
+    gestureHandling: state.lassoActive ? 'none' : 'greedy',
+    zoomControl: !state.lassoActive,
+  });
+
+  const btn = $('#btnLasso');
+  if(btn){
+    btn.classList.toggle('active', state.lassoActive);
+    btn.textContent = state.lassoActive ? '✖️ Cancel' : '🔲 Lasso Area';
+  }
+  if(state.lassoActive) toast('Draw a circle around the houses 🔲');
+}
+
+function finishLasso(){
+  const pts = state.lassoPts;
+  if(pts.length < 3){
+    toast('Draw a bigger loop and try again.');
+    state.lassoSvg.setAttribute('points','');
+    return;
+  }
+  const proj = state.projOverlay && state.projOverlay.getProjection();
+  if(!proj || !google.maps.geometry){
+    toast('Map tools still loading — try again in a sec.');
+    return;
+  }
+
+  const path = pts.map(p => proj.fromContainerPixelToLatLng(new google.maps.Point(p.x, p.y)));
+  const poly = new google.maps.Polygon({ paths: path });
+  const inside = state.pins.filter(pin =>
+    google.maps.geometry.poly.containsLocation(new google.maps.LatLng(pin.lat, pin.lng), poly)
+  );
+
+  toggleLasso(); // turn it back off and restore panning
+  openLassoResults(inside);
+}
+
+function openLassoResults(pins){
+  if(pins.length === 0){
+    toast('No logged doors inside that area.');
+    return;
+  }
+  const s = doorStats(pins);
+  const leads = pins.filter(p=>p.status==='lead').sort((a,b)=> b.timestamp - a.timestamp);
+  const attempts = pins.filter(p=>p.status==='attempted').sort((a,b)=> b.timestamp - a.timestamp);
+  const salesValue = pins.filter(p=>p.status==='sale')
+    .reduce((sum,p)=>{
+      const job = p.jobId ? state.jobs.find(j=>j.id===p.jobId) : null;
+      return sum + (job ? Number(job.price)||0 : 0);
+    }, 0);
+
+  const pinRow = (p)=>`
+    <button class="job-card" data-lasso-pin="${p.id}">
+      <span class="job-dot" style="background:${STATUS_HEX[p.status]}"></span>
+      <span class="job-info">
+        <span class="job-name">${escapeHtml(p.address || 'No address')}</span>
+        <span class="job-sub">${daysSince(p.timestamp)}d ago · logged by ${escapeHtml(p.createdBy||'—')}</span>
+        ${p.notes ? `<span class="job-sub" style="color:var(--text-faint);">${escapeHtml(p.notes)}</span>` : ''}
+      </span>
+    </button>`;
+
+  openModal(`
+    <div class="modal-title">🔲 Neighborhood Stats</div>
+    <div style="color:var(--text-dim); font-size:13px; margin-bottom:12px;">${s.totalLogged} doors logged in this area</div>
+
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-emoji">🚪</div><div class="stat-value">${s.knocked}</div><div class="stat-label">Doors Knocked</div></div>
+      <div class="stat-card"><div class="stat-emoji">✅</div><div class="stat-value">${s.sale}</div><div class="stat-label">Sales${salesValue?` · ${fmtMoney(salesValue)}`:''}</div></div>
+      <div class="stat-card"><div class="stat-emoji">🤝</div><div class="stat-value">${pctStr(s.closeRate)}</div><div class="stat-label">Close Rate</div></div>
+      <div class="stat-card"><div class="stat-emoji">🎯</div><div class="stat-value">${pctStr(s.doorToSale)}</div><div class="stat-label">Door → Sale</div></div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      ${funnelRow('Knocked', s.knocked, s.knocked, 'var(--accent)')}
+      ${funnelRow('Answered', s.answered, s.knocked, '#6ea8ff', pctStr(s.answerRate))}
+      ${funnelRow('Leads', s.lead, s.knocked, '#6ea8ff')}
+      ${funnelRow('Sales', s.sale, s.knocked, '#3ee08a')}
+      ${s.nosolicit ? `<div style="font-size:12px; color:var(--text-faint); margin-top:10px;">🚫 ${s.nosolicit} no-soliciting ${s.nosolicit===1?'house':'houses'} in here — skip those.</div>` : ''}
+    </div>
+
+    ${leads.length ? `<div class="section-title">🔵 Leads to Re-Knock (${leads.length})</div>${leads.map(pinRow).join('')}` : ''}
+    ${attempts.length ? `<div class="section-title">🟡 Nobody Home — Try Again (${attempts.length})</div>${attempts.map(pinRow).join('')}` : ''}
+    ${(!leads.length && !attempts.length) ? `<div class="empty-state" style="padding:22px;"><div class="empty-emoji">✨</div>No open opportunities left in this pocket.</div>` : ''}
+  `);
+
+  $all('[data-lasso-pin]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const pin = state.pins.find(p=>p.id === btn.getAttribute('data-lasso-pin'));
+      if(pin){ closeModal(); setTimeout(()=>openPinDetail(pin), 180); }
+    });
+  });
 }
 
 function startLocationTracking(recenterOnFirstFix){
@@ -1155,19 +1545,20 @@ function drawMapMarkers(){
   if(!state.map) return;
   state.markers.forEach(m => m.setMap(null));
   state.markers = [];
-  const HEX = { sale:'#3ee08a', attempted:'#ffcc4d', lead:'#6ea8ff', no:'#ff6b6b' };
   state.pins.forEach(pin=>{
     const meta = STATUS_META[pin.status] || STATUS_META.lead;
+    const isNoSolicit = pin.status === 'nosolicit';
     const marker = new google.maps.Marker({
       position: { lat: pin.lat, lng: pin.lng },
       map: state.map,
       title: `${meta.label}${pin.customerName ? ' · '+pin.customerName : ''}`,
+      zIndex: isNoSolicit ? 1 : 2,
       icon: {
         path: google.maps.SymbolPath.CIRCLE,
-        scale: 9,
-        fillColor: HEX[pin.status] || HEX.lead,
+        scale: isNoSolicit ? 7 : 9,
+        fillColor: STATUS_HEX[pin.status] || STATUS_HEX.lead,
         fillOpacity: 1,
-        strokeColor: '#ffffff',
+        strokeColor: isNoSolicit ? '#8792a8' : '#ffffff',
         strokeWeight: 2.5,
       },
     });
@@ -1338,10 +1729,12 @@ async function uploadPhoto(file, folder){
 function renderTeam(){
   const el = $('#teamContent');
   el.innerHTML = `
+    <button class="back-link" id="teamBack" style="margin-bottom:6px;">‹ Back to More</button>
     <div class="section-title">Cleaning Techs</div>
     <div id="teamList"></div>
     <button class="btn-primary" id="btnAddTech">+ Add a Cleaning Tech</button>
   `;
+  $('#teamBack').addEventListener('click', ()=> switchView('settings'));
   const list = $('#teamList');
   if(state.techs.length === 0){
     list.innerHTML = `<div class="empty-state"><div class="empty-emoji">🧽</div>No techs yet — add your first one below.</div>`;
@@ -1483,6 +1876,15 @@ function renderSettings(){
 
   if(isOwner){
     el.innerHTML = `
+      <button class="card nav-card" id="goTeam">
+        <span style="font-size:22px;">👥</span>
+        <span style="flex:1; text-align:left;">
+          <span style="display:block; font-weight:800;">Team</span>
+          <span style="display:block; font-size:12.5px; color:var(--text-dim);">${state.techs.length} cleaning tech${state.techs.length===1?'':'s'} · commissions & passcodes</span>
+        </span>
+        <span style="color:var(--accent);">›</span>
+      </button>
+
       <div class="section-title">Business</div>
       <div class="card">
         <label class="field-label">Business Name</label>
@@ -1504,6 +1906,7 @@ function renderSettings(){
       <button class="btn-secondary btn-danger" id="btnLogout" style="margin-top:20px;">🚪 Sign Out</button>
       <p style="text-align:center; color:var(--text-faint); font-size:12px; margin-top:24px;">SqueegeeHQ · made for window cleaning crews 🫧</p>
     `;
+    $('#goTeam').addEventListener('click', ()=> switchView('team'));
     $('#btnSaveBiz').addEventListener('click', async ()=>{
       await db.collection('meta').doc('app').set({
         businessName: $('#setBizName').value.trim(),

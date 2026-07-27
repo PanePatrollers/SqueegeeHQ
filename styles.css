@@ -21,6 +21,8 @@
   --lead: #6ea8ff;
   --no: #ff6b6b;
 
+  --nosolicit: #0b0f16;
+
   --danger: #ff6b6b;
   --radius-lg: 26px;
   --radius-md: 18px;
@@ -253,7 +255,7 @@ textarea.bubble-input{ min-height: 80px; resize: vertical; }
 }
 .photo-preview{ width:100%; border-radius: var(--radius-md); margin-top:10px; max-height: 200px; object-fit:cover; }
 
-.status-pick-row{ display:grid; grid-template-columns: repeat(4,1fr); gap:8px; margin: 10px 0 4px; }
+.status-pick-row{ display:grid; grid-template-columns: repeat(3,1fr); gap:8px; margin: 10px 0 4px; }
 .status-pick-btn{
   padding: 12px 4px; border-radius: var(--radius-md); background: var(--card); border: 2px solid var(--border);
   text-align:center; font-size:12px; font-weight:800;
@@ -263,6 +265,64 @@ textarea.bubble-input{ min-height: 80px; resize: vertical; }
 .status-pick-btn.pick-attempted.selected{ border-color: var(--attempted); background: rgba(255,204,77,0.12); color: var(--attempted); }
 .status-pick-btn.pick-lead.selected{ border-color: var(--lead); background: rgba(110,168,255,0.12); color: var(--lead); }
 .status-pick-btn.pick-no.selected{ border-color: var(--no); background: rgba(255,107,107,0.12); color: var(--no); }
+.status-pick-btn.pick-nosolicit.selected{ border-color: #8792a8; background: #0b0f16; color: #c3cbdb; }
+
+/* ---------------- Lasso ---------------- */
+.google-map{ position: relative; }
+.lasso-layer{
+  position:absolute; inset:0; z-index:5; pointer-events:none; touch-action:none;
+  background: transparent; transition: background .15s ease;
+}
+.lasso-layer.active{ pointer-events:auto; background: rgba(55,200,255,0.07); cursor: crosshair; }
+.lasso-layer .lasso-hint{
+  display:none; position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  background: rgba(13,17,23,0.85); color: var(--text); font-size:12.5px; font-weight:700;
+  padding:8px 14px; border-radius:999px; border:1px solid var(--border); white-space:nowrap;
+}
+.lasso-layer.active .lasso-hint{ display:block; }
+.lasso-svg{ width:100%; height:100%; display:block; }
+.lasso-path{
+  fill: rgba(55,200,255,0.16); stroke:#37c8ff; stroke-width:3;
+  stroke-linejoin:round; stroke-linecap:round;
+}
+
+/* ---------------- Stats / charts ---------------- */
+.lifetime-card{
+  background: var(--accent-grad); color:#08121a; border-radius: var(--radius-lg);
+  padding: 20px; text-align:center; margin-bottom:16px; box-shadow: 0 8px 24px rgba(55,200,255,0.2);
+}
+.lifetime-num{ font-size:42px; font-weight:900; line-height:1; }
+.lifetime-label{ font-size:13px; font-weight:800; opacity:.75; margin-top:4px; }
+.lifetime-sub{ font-size:12px; font-weight:700; opacity:.65; margin-top:8px; }
+
+.stat-fine{ font-size:10.5px; color: var(--text-faint); font-weight:600; }
+
+.chart-card{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.donut{ width:132px; height:132px; flex-shrink:0; }
+.donut-top{ fill: var(--text); font-size:26px; font-weight:800; }
+.donut-sub{ fill: var(--text-faint); font-size:9.5px; font-weight:700; }
+.donut-legend{ flex:1; min-width:150px; display:flex; flex-direction:column; gap:7px; }
+.legend-row{ display:flex; align-items:center; gap:8px; font-size:12.5px; }
+.legend-dot{ width:11px; height:11px; border-radius:50%; flex-shrink:0; display:inline-block; }
+.legend-name{ flex:1; color: var(--text-dim); font-weight:600; }
+.legend-val{ font-weight:800; }
+
+.funnel-row{ margin-bottom:14px; }
+.funnel-row:last-child{ margin-bottom:0; }
+.funnel-head{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
+.funnel-label{ font-size:13px; color: var(--text-dim); font-weight:600; }
+.funnel-value{ font-size:15px; font-weight:800; }
+.funnel-sub{ font-size:11.5px; color: var(--text-faint); font-weight:700; }
+.funnel-track{ height:10px; background: var(--bg-2); border-radius:999px; overflow:hidden; }
+.funnel-fill{ height:100%; border-radius:999px; transition: width .4s ease; }
+
+.trend-chart{ width:100%; height:auto; display:block; }
+.chart-x{ fill: var(--text-faint); font-size:8px; font-weight:700; }
+.chart-key{ display:flex; gap:16px; justify-content:center; margin-top:10px; font-size:11.5px; color: var(--text-dim); font-weight:700; }
+.chart-key span{ display:flex; align-items:center; gap:5px; }
+
+.nav-card{ display:flex; align-items:center; gap:12px; width:100%; text-align:left; }
+.nav-card:active{ background: var(--card-2); }
 
 .earn-highlight{
   background: var(--accent-grad); color:#08121a; border-radius: var(--radius-md); padding: 16px; text-align:center; margin: 10px 0 16px;
