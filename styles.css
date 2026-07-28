@@ -190,9 +190,25 @@ a{ color: var(--accent); }
   font-size:12.5px; color: var(--text-dim); line-height:1.3;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+.job-phone{
+  font-size:12.5px; font-weight:700; color: var(--accent); text-decoration:none;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:inline-block;
+}
+.job-phone:active{ opacity:.6; }
 .job-right{
   display:flex; flex-direction:column; align-items:flex-end; gap:5px; flex-shrink:0;
 }
+
+.call-strip{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  background: var(--card); border:1px solid rgba(55,200,255,0.3); border-radius: var(--radius-md);
+  padding: 13px 16px; margin-bottom:12px; text-decoration:none;
+  color: var(--accent); font-weight:800; font-size:15px;
+}
+.call-strip:active{ background: var(--card-2); }
+.call-cta{ font-size:11px; color: var(--text-faint); font-weight:700; }
+
+.owner-keep-card{ border-color: rgba(79,224,196,0.35); background: rgba(79,224,196,0.06); }
 .job-price{ font-weight:800; font-size:16px; color: var(--accent-2); flex-shrink:0; line-height:1.1; }
 .job-status-badge{
   font-size:10px; font-weight:800; padding:3px 9px; border-radius:999px; flex-shrink:0;

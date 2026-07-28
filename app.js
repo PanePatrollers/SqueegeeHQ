@@ -135,6 +135,7 @@ function doorStats(pins){
 const pctStr = n => `${n.toFixed(1)}%`;
 
 function calcEarning(job, tech){
+  if(job.ownerCompleted) return 0;   // owner did it — no commission owed
   const commissionPct = (tech ? tech.commissionPct : state.settings.defaultCommissionPct) ?? 20;
   const tipsPct = state.settings.tipsPct ?? 100;
   const price = Number(job.price)||0;
@@ -641,7 +642,7 @@ function renderPlansMonths(entries){
 
 function openPlanDetail(e){
   const j = e.job;
-  const phone = (state.customers.find(c=>c.id===j.customerId)||{}).phone || '';
+  const phone = jobPhone(j);
   const urgencyText = e.rebooked ? '✅ Already rebooked'
     : e.urgency==='due' ? '🔴 Ready to reach out now'
     : e.urgency==='soon' ? '🟡 Coming due soon'
@@ -668,7 +669,7 @@ function openPlanDetail(e){
     ${j.vibes && j.vibes.length ? `<div class="vibe-tags">${j.vibes.map(v=>`<span class="vibe-tag selected">${v}</span>`).join('')}</div>` : ''}
     ${j.notes ? `<div class="card" style="margin-top:12px;"><div style="font-size:12px; color:var(--text-dim); margin-bottom:4px; font-weight:700;">NOTES</div>${escapeHtml(j.notes)}</div>` : ''}
 
-    ${phone ? `<a href="tel:${escapeHtml(phone)}" class="btn-secondary btn-block" style="text-align:center; text-decoration:none; margin-top:14px; display:block;">📞 Call ${escapeHtml(phone)}</a>` : ''}
+    ${phone ? `<a href="tel:${escapeHtml(phone)}" class="btn-secondary btn-block" style="text-align:center; text-decoration:none; margin-top:14px; display:block;">📞 Call ${escapeHtml(fmtPhone(phone))}</a>` : ''}
     <button class="btn-primary" id="btnBookAgain">📅 Book Them Again</button>
     <button class="btn-secondary" id="btnMarkContacted">📞 Mark as Reached Out</button>
     <button class="btn-secondary" id="btnCustomCycle">⏱️ Change Their Cycle (${e.cycleForThis} mo)</button>
@@ -677,7 +678,7 @@ function openPlanDetail(e){
   $('#btnBookAgain').addEventListener('click', ()=>{
     closeModal();
     openJobForm(null, todayStr(), {
-      customerName: j.customerName, address: j.address, price: j.price,
+      customerName: j.customerName, address: j.address, price: j.price, phone: jobPhone(j),
       vibes: j.vibes || [], notes: j.notes || '', photoURL: j.photoURL || null,
       lat: j.lat || null, lng: j.lng || null, customerId: j.customerId || null,
     });
@@ -958,6 +959,28 @@ function renderHome(){
 }
 
 /* ---------------- shared job card ---------------- */
+/* Pulls the phone number from the job, or falls back to the linked
+   customer record — so every job you ever logged shows its number,
+   nothing needs re-entering. */
+function jobPhone(job){
+  if(job.phone) return job.phone;
+  if(job.customerId){
+    const c = state.customers.find(x => x.id === job.customerId);
+    if(c && c.phone) return c.phone;
+  }
+  const key = `${(job.customerName||'').toLowerCase().trim()}|${(job.address||'').toLowerCase().trim()}`;
+  const c2 = state.customers.find(x =>
+    `${(x.name||'').toLowerCase().trim()}|${(x.address||'').toLowerCase().trim()}` === key);
+  return (c2 && c2.phone) || '';
+}
+
+function fmtPhone(p){
+  const d = String(p||'').replace(/\D/g,'');
+  if(d.length === 10) return `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`;
+  if(d.length === 11 && d[0]==='1') return `(${d.slice(1,4)}) ${d.slice(4,7)}-${d.slice(7)}`;
+  return p || '';
+}
+
 function fmtTime(t){
   if(!t) return '';
   const [h,m] = t.split(':').map(Number);
@@ -970,23 +993,28 @@ function fmtTime(t){
    lives inside the job detail sheet so this stays readable. */
 function jobCardHtml(job){
   const tech = techById(job.techId);
-  const color = tech ? tech.color : '#66728a';
+  const color = job.ownerCompleted ? '#37c8ff' : (tech ? tech.color : '#66728a');
   const badgeClass = job.status === 'completed' ? 'badge-completed' : 'badge-cancelled';
-  const sub = [fmtTime(job.time), tech ? tech.name : 'Unassigned'].filter(Boolean).join(' · ');
+  const who = job.ownerCompleted ? 'You' : (tech ? tech.name : 'Unassigned');
+  const sub = [fmtTime(job.time), who].filter(Boolean).join(' · ');
+  const phone = jobPhone(job);
   return `
-    <button class="job-card" data-job-id="${job.id}">
+    <div class="job-card" data-job-id="${job.id}">
       <span class="job-dot" style="background:${color}"></span>
       <span class="job-info">
         <span class="job-name">${escapeHtml(job.customerName || 'Untitled')}</span>
         <span class="job-sub">${escapeHtml(sub)}</span>
+        ${phone ? `<a class="job-phone" href="tel:${escapeHtml(phone)}" data-stop>📞 ${escapeHtml(fmtPhone(phone))}</a>` : ''}
       </span>
       <span class="job-right">
         <span class="job-price">${fmtMoney(job.price)}</span>
         ${job.status !== 'scheduled' ? `<span class="job-status-badge ${badgeClass}">${job.status}</span>` : ''}
       </span>
-    </button>`;
+    </div>`;
 }
 function attachJobCardHandlers(root){
+  // tapping the phone link calls; tapping anywhere else opens the job
+  $all('[data-stop]', root).forEach(a => a.addEventListener('click', e => e.stopPropagation()));
   $all('[data-job-id]', root).forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const job = state.jobs.find(j => j.id === btn.getAttribute('data-job-id'));
@@ -1076,21 +1104,28 @@ function openJobDetail(job){
   const isDone = job.status === 'completed';
   const doneTs = isDone ? jobCompletedTs(job) : null;
   const cyc = Number(job.rebookMonths) || rebookCycle();
+  const phone = jobPhone(job);
+  const ownerKeeps = (Number(job.price)||0) - earning;
 
   openModal(`
     <div class="modal-title">${escapeHtml(job.customerName||'Job')}</div>
     <div style="color:var(--text-dim); font-size:13px; margin-bottom:10px;">${escapeHtml(job.address||'No address')}</div>
     ${job.photoURL ? `<img src="${job.photoURL}" class="photo-preview" />` : ''}
 
+    ${phone ? `<a href="tel:${escapeHtml(phone)}" class="call-strip">📞 ${escapeHtml(fmtPhone(phone))}<span class="call-cta">Tap to call</span></a>` : ''}
+
     <div class="earn-highlight">
-      <div class="earn-amt">${fmtMoney(earning)}</div>
-      <div class="earn-label">${isOwner ? (tech?escapeHtml(tech.name)+"'s ":'') + 'earning on this job' : 'you earn on this job'}</div>
+      <div class="earn-amt">${isOwner ? fmtMoney(ownerKeeps) : fmtMoney(earning)}</div>
+      <div class="earn-label">${isOwner
+        ? (job.ownerCompleted ? 'you keep 100% — you did this one' : 'your take after commission')
+        : 'you earn on this job'}</div>
     </div>
 
     <div class="card">
       <div class="card-row"><span style="color:var(--text-dim);">Job Price</span><b>${fmtMoney(job.price)}</b></div>
-      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Date / Time</span><b>${fmtDateLabel(job.date)} · ${job.time||'—'}</b></div>
-      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Tech</span><b>${tech?escapeHtml(tech.name):'Unassigned'}</b></div>
+      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Date / Time</span><b>${fmtDateLabel(job.date)} · ${fmtTime(job.time)||'—'}</b></div>
+      <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Cleaned by</span><b>${job.ownerCompleted ? '👑 You' : (tech?escapeHtml(tech.name):'Unassigned')}</b></div>
+      ${isOwner && !job.ownerCompleted && tech ? `<div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">${escapeHtml(tech.name)}'s cut</span><b>${fmtMoney(earning)}</b></div>` : ''}
       <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Tip</span><b>${fmtMoney(job.tip||0)}</b></div>
       <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Status</span><b style="text-transform:capitalize;">${job.status}</b></div>
       ${isDone ? `
@@ -1106,6 +1141,7 @@ function openJobDetail(job){
 
     ${(isMine && job.status==='scheduled') ? `<button class="btn-primary" id="btnMarkComplete">✅ Mark Job Complete</button>` : ''}
     ${(isOwner) ? `
+      ${job.status==='scheduled' ? `<button class="btn-primary" id="btnOwnerComplete">👑 I Cleaned This — Complete It</button>` : ''}
       ${isDone ? `<button class="btn-primary" id="btnBookAgainJob">🔁 Book Them Again</button>` : ''}
       <button class="btn-secondary" id="btnEditJob">✏️ Edit Job</button>
       <button class="btn-secondary btn-danger" id="btnDeleteJob">🗑️ Delete Job</button>
@@ -1113,11 +1149,12 @@ function openJobDetail(job){
   `);
 
   if($('#btnMarkComplete')) $('#btnMarkComplete').addEventListener('click', ()=> openCompleteJobFlow(job));
+  if($('#btnOwnerComplete')) $('#btnOwnerComplete').addEventListener('click', ()=> openCompleteJobFlow(job, true));
   if($('#btnEditJob')) $('#btnEditJob').addEventListener('click', ()=>{ closeModal(); openJobForm(job); });
   if($('#btnBookAgainJob')) $('#btnBookAgainJob').addEventListener('click', ()=>{
     closeModal();
     openJobForm(null, todayStr(), {
-      customerName: job.customerName, address: job.address, price: job.price,
+      customerName: job.customerName, address: job.address, price: job.price, phone: jobPhone(job),
       vibes: job.vibes || [], notes: job.notes || '', photoURL: job.photoURL || null,
       lat: job.lat || null, lng: job.lng || null, customerId: job.customerId || null,
     });
@@ -1131,10 +1168,19 @@ function openJobDetail(job){
   });
 }
 
-function openCompleteJobFlow(job){
+function openCompleteJobFlow(job, asOwner){
   const cyc = Number(job.rebookMonths) || rebookCycle();
+  const price = Number(job.price)||0;
   openModal(`
-    <div class="modal-title">Nice work! 🎉</div>
+    <div class="modal-title">${asOwner ? 'Completing it yourself 👑' : 'Nice work! 🎉'}</div>
+    ${asOwner ? `
+      <div class="card owner-keep-card">
+        <div class="card-row"><span style="color:var(--text-dim);">Job price</span><b>${fmtMoney(price)}</b></div>
+        <div class="card-row" style="margin-top:8px;"><span style="color:var(--text-dim);">Commission paid out</span><b>$0.00</b></div>
+        <div class="card-row" style="margin-top:8px; padding-top:10px; border-top:1px solid var(--border);">
+          <span style="font-weight:800;">You keep</span><b style="color:var(--accent-2); font-size:18px;">${fmtMoney(price)}</b>
+        </div>
+      </div>` : ''}
     <p style="color:var(--text-dim); font-size:14px;">Any tip from the customer?</p>
     <div class="form-row">
       <label class="field-label">Tip Amount ($)</label>
@@ -1143,13 +1189,19 @@ function openCompleteJobFlow(job){
     <div class="card" style="font-size:13px; color:var(--text-dim); line-height:1.5;">
       🔁 This customer will pop up in <b style="color:var(--text);">Plans</b> for rebooking in about <b style="color:var(--text);">${cyc} months</b>.
     </div>
-    <button class="btn-primary" id="btnConfirmComplete">Mark Complete</button>
+    <button class="btn-primary" id="btnConfirmComplete">${asOwner ? 'Complete & Keep 100%' : 'Mark Complete'}</button>
   `);
   $('#btnConfirmComplete').addEventListener('click', async ()=>{
     const tip = Number($('#tipInput').value) || 0;
-    await db.collection('jobs').doc(job.id).update({ status:'completed', tip, completedAt: Date.now() });
+    const payload = { status:'completed', tip, completedAt: Date.now() };
+    if(asOwner){
+      payload.ownerCompleted = true;
+      payload.techId = null;      // no commission owed to anyone
+      payload.techName = null;
+    }
+    await db.collection('jobs').doc(job.id).update(payload);
     closeModal();
-    toast('Job complete — added to your rebooking list 🫧');
+    toast(asOwner ? `All yours — ${fmtMoney(price + tip)} kept 👑` : 'Job complete — added to your rebooking list 🫧');
   });
 }
 
@@ -1163,6 +1215,10 @@ function openJobForm(job, presetDate, prefill){
     <div class="form-row">
       <label class="field-label">Customer Name</label>
       <input id="jfName" class="bubble-input" value="${escapeHtml(v('customerName'))}" />
+    </div>
+    <div class="form-row">
+      <label class="field-label">Phone</label>
+      <input id="jfPhone" class="bubble-input" type="tel" value="${escapeHtml(job ? jobPhone(job) : (p.phone||''))}" />
     </div>
     <div class="form-row">
       <label class="field-label">Address</label>
@@ -1232,6 +1288,7 @@ function openJobForm(job, presetDate, prefill){
     const tech = techById(techId);
     const payload = {
       customerName: name,
+      phone: $('#jfPhone').value.trim(),
       address: $('#jfAddress').value.trim(),
       price: Number($('#jfPrice').value) || 0,
       techId: techId,
