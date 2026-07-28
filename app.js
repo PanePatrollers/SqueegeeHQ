@@ -958,19 +958,32 @@ function renderHome(){
 }
 
 /* ---------------- shared job card ---------------- */
+function fmtTime(t){
+  if(!t) return '';
+  const [h,m] = t.split(':').map(Number);
+  const ampm = h >= 12 ? 'pm' : 'am';
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${hr}:${pad2(m)}${ampm}` : `${hr}${ampm}`;
+}
+
+/* Slim cover card — name, who + when, price. Everything else
+   lives inside the job detail sheet so this stays readable. */
 function jobCardHtml(job){
   const tech = techById(job.techId);
-  const color = tech ? tech.color : '#666';
-  const badgeClass = job.status === 'completed' ? 'badge-completed' : job.status === 'cancelled' ? 'badge-cancelled' : 'badge-scheduled';
+  const color = tech ? tech.color : '#66728a';
+  const badgeClass = job.status === 'completed' ? 'badge-completed' : 'badge-cancelled';
+  const sub = [fmtTime(job.time), tech ? tech.name : 'Unassigned'].filter(Boolean).join(' · ');
   return `
     <button class="job-card" data-job-id="${job.id}">
       <span class="job-dot" style="background:${color}"></span>
       <span class="job-info">
         <span class="job-name">${escapeHtml(job.customerName || 'Untitled')}</span>
-        <span class="job-sub">${tech ? escapeHtml(tech.name) : 'Unassigned'} · ${job.time || 'no time'} ${state.currentUser.role==='owner' ? '· '+escapeHtml(job.address||'') : ''}</span>
+        <span class="job-sub">${escapeHtml(sub)}</span>
       </span>
-      <span class="job-price">${fmtMoney(job.price)}</span>
-      <span class="job-status-badge ${badgeClass}">${job.status}</span>
+      <span class="job-right">
+        <span class="job-price">${fmtMoney(job.price)}</span>
+        ${job.status !== 'scheduled' ? `<span class="job-status-badge ${badgeClass}">${job.status}</span>` : ''}
+      </span>
     </button>`;
 }
 function attachJobCardHandlers(root){
@@ -1026,7 +1039,6 @@ function renderCalendar(){
         </button>`;
       }).join('')}
     </div>
-    ${isOwner ? `<div style="margin-top:16px;"><button class="btn-secondary" id="btnNewJob">+ Schedule a Job</button></div>` : ''}
     <div class="section-title">${fmtDateLabel(state.calSelectedDate)}</div>
     <div id="calDayList"></div>
   `;
@@ -1039,7 +1051,6 @@ function renderCalendar(){
     row.innerHTML = `<button class="btn-pill ${state.calTechFilter==='all'?'active':''}" data-filter="all">All</button>` +
       state.techs.map(t=>`<button class="btn-pill ${state.calTechFilter===t.id?'active':''}" data-filter="${t.id}" style="${state.calTechFilter===t.id?`background:${t.color};color:#08121a;`:''}">${escapeHtml(t.name)}</button>`).join('');
     $all('[data-filter]', row).forEach(btn=> btn.addEventListener('click', ()=>{ state.calTechFilter = btn.getAttribute('data-filter'); renderCalendar(); }));
-    $('#btnNewJob').addEventListener('click', ()=> openJobForm(null, state.calSelectedDate));
   }
 
   const dayList = $('#calDayList');
